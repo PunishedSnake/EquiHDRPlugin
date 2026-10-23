@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { app, type IpcMainInvokeEvent } from "electron";
@@ -55,6 +55,10 @@ function parseExpectedSha256(text: string): string {
     return match[1].toLowerCase();
 }
 
+async function sha256File(path: string): Promise<string> {
+    return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
 async function downloadHelper(force = false): Promise<string> {
     if (process.platform !== "win32")
         throw new Error("EquiHDR native mirror currently supports Windows only");
@@ -63,15 +67,25 @@ async function downloadHelper(force = false): Promise<string> {
     const exe = helperPath();
     await mkdir(dir, { recursive: true });
 
-    if (existsSync(exe) && !force) return exe;
+    // The helper release uses a stable tag. Always fetch the tiny hash file so an
+    // updated helper is picked up automatically without making the user hunt down
+    // an old EXE in AppData.
+    const hashText = await fetchText(`${RELEASE_BASE}/${HASH_NAME}`);
+    const expected = parseExpectedSha256(hashText);
 
-    const [hashText, binary, licenseText] = await Promise.all([
-        fetchText(`${RELEASE_BASE}/${HASH_NAME}`),
+    if (existsSync(exe) && !force) {
+        try {
+            if (await sha256File(exe) === expected) return exe;
+        } catch {
+            // Fall through and replace a missing/corrupt/unreadable local helper.
+        }
+    }
+
+    const [binary, licenseText] = await Promise.all([
         fetchBytes(`${RELEASE_BASE}/${HELPER_NAME}`),
         fetchText(`${RELEASE_BASE}/${LICENSE_NAME}`)
     ]);
 
-    const expected = parseExpectedSha256(hashText);
     const actual = createHash("sha256").update(binary).digest("hex");
     if (actual !== expected)
         throw new Error(`Helper SHA-256 mismatch. Expected ${expected}, got ${actual}`);
