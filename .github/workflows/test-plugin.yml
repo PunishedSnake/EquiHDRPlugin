@@ -1,0 +1,49 @@
+name: Test Equicord plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index.ts"
+      - "native.ts"
+      - ".github/workflows/test-plugin.yml"
+  pull_request:
+    paths:
+      - "index.ts"
+      - "native.ts"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out EquiHDRPlugin
+        uses: actions/checkout@v4
+
+      - name: Check out Equicord
+        uses: actions/checkout@v4
+        with:
+          repository: Equicord/Equicord
+          path: equicord
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install plugin into test tree
+        shell: bash
+        run: |
+          mkdir -p equicord/src/userplugins/EquiHDRPlugin
+          cp index.ts native.ts equicord/src/userplugins/EquiHDRPlugin/
+
+      - name: Install Equicord dependencies
+        working-directory: equicord
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Equicord with EquiHDRPlugin
+        working-directory: equicord
+        run: pnpm build
