@@ -13,7 +13,9 @@ permissions:
 
 jobs:
   build-hook:
-    runs-on: windows-latest
+    # node-gyp 11 does not yet reliably discover the VS 2026 image used by
+    # windows-latest, so keep this on the mature VS 2022 toolchain.
+    runs-on: windows-2022
 
     steps:
       - name: Check out repository
@@ -31,10 +33,12 @@ jobs:
 
       - name: Install native addon dependencies
         working-directory: native-hook
-        run: npm install
+        run: npm install --ignore-scripts
 
       - name: Build native addon
         working-directory: native-hook
+        env:
+          GYP_MSVS_VERSION: "2022"
         run: npm run build
 
       - name: Prepare release assets
