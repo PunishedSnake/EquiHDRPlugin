@@ -1,36 +1,42 @@
 /*
- * EquiHDRPlugin native helper bridge
+ * EquiHDRPlugin native hook bridge
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import { createHash } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { app, type IpcMainInvokeEvent } from "electron";
 
-const RELEASE_BASE = "https://github.com/PunishedSnake/EquiHDRPlugin/releases/download/helper-latest";
-const HELPER_NAME = "EquiHDRHelper.exe";
-const HASH_NAME = "EquiHDRHelper.exe.sha256";
-const LICENSE_NAME = "HDR-Corrector-LICENSE.txt";
+const PRELOAD_WORLD_ID = 999;
+const RELEASE_BASE = "https://github.com/PunishedSnake/EquiHDRPlugin/releases/download/hook-latest";
+const ADDON_NAME = "equihdr_hook.node";
+const HASH_NAME = "equihdr_hook.node.sha256";
 
-let helperProcess: ChildProcess | null = null;
+export interface ToneMapConfig {
+    enabled: boolean;
+    toneMapper: number;
+    exposureEv: number;
+    paperWhiteNits: number;
+    peakNits: number;
+    outputGain: number;
+    gammaCompensation: number;
+    saturation: number;
+}
 
-export interface HelperResult {
+export interface HookResult {
     ok: boolean;
     message: string;
-    path?: string;
-    pid?: number;
+    installed?: boolean;
+    target?: string;
+    addonPath?: string;
+    [key: string]: any;
 }
 
-function helperDirectory(): string {
-    return join(app.getPath("userData"), "EquiHDRPlugin");
-}
-
-function helperPath(): string {
-    return join(helperDirectory(), HELPER_NAME);
+function hookDirectory(): string {
+    return join(app.getPath("userData"), "EquiHDRPlugin", "native-hook");
 }
 
 async function fetchBytes(url: string): Promise<Buffer> {
@@ -51,126 +57,146 @@ async function fetchText(url: string): Promise<string> {
 
 function parseExpectedSha256(text: string): string {
     const match = text.trim().match(/^([a-fA-F0-9]{64})(?:\s+.+)?$/);
-    if (!match) throw new Error("Invalid helper SHA-256 file");
+    if (!match) throw new Error("Invalid native-hook SHA-256 file");
     return match[1].toLowerCase();
 }
 
-async function sha256File(path: string): Promise<string> {
+async function fileSha256(path: string): Promise<string> {
     return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
-async function downloadHelper(force = false): Promise<string> {
+async function resolveHookAddon(): Promise<string> {
     if (process.platform !== "win32")
-        throw new Error("EquiHDR native mirror currently supports Windows only");
+        throw new Error("EquiHDR native D3D11 hook currently supports Windows only");
 
-    const dir = helperDirectory();
-    const exe = helperPath();
+    const dir = hookDirectory();
     await mkdir(dir, { recursive: true });
 
-    // The helper release uses a stable tag. Always fetch the tiny hash file so an
-    // updated helper is picked up automatically without making the user hunt down
-    // an old EXE in AppData.
+    // Use a hash-versioned filename because Windows keeps loaded .node modules
+    // locked. A new release can then coexist with the previous loaded binary
+    // until Discord is restarted.
     const hashText = await fetchText(`${RELEASE_BASE}/${HASH_NAME}`);
     const expected = parseExpectedSha256(hashText);
+    const target = join(dir, `equihdr_hook-${expected.slice(0, 16)}.node`);
 
-    if (existsSync(exe) && !force) {
+    if (existsSync(target)) {
         try {
-            if (await sha256File(exe) === expected) return exe;
+            if (await fileSha256(target) === expected) return target;
         } catch {
-            // Fall through and replace a missing/corrupt/unreadable local helper.
+            // Re-download below.
         }
     }
 
-    const [binary, licenseText] = await Promise.all([
-        fetchBytes(`${RELEASE_BASE}/${HELPER_NAME}`),
-        fetchText(`${RELEASE_BASE}/${LICENSE_NAME}`)
-    ]);
-
+    const binary = await fetchBytes(`${RELEASE_BASE}/${ADDON_NAME}`);
     const actual = createHash("sha256").update(binary).digest("hex");
     if (actual !== expected)
-        throw new Error(`Helper SHA-256 mismatch. Expected ${expected}, got ${actual}`);
+        throw new Error(`Native-hook SHA-256 mismatch. Expected ${expected}, got ${actual}`);
 
-    const temp = `${exe}.download`;
-    await rm(temp, { force: true });
-    await writeFile(temp, binary);
-    await rm(exe, { force: true });
-    await rename(temp, exe);
-    await writeFile(join(dir, LICENSE_NAME), licenseText, "utf8");
-    await writeFile(join(dir, HASH_NAME), `${expected}  ${HELPER_NAME}`, "utf8");
-
-    return exe;
+    await writeFile(target, binary);
+    return target;
 }
 
-function processIsRunning(): boolean {
-    return helperProcess != null && helperProcess.exitCode == null && !helperProcess.killed;
+function isolatedRequireBootstrap(addonPath: string) {
+    return `
+        const requireFn =
+            typeof globalThis.require === "function"
+                ? globalThis.require
+                : typeof globalThis.module?.require === "function"
+                    ? globalThis.module.require.bind(globalThis.module)
+                    : (() => {
+                        const moduleBuiltin = globalThis.process?.getBuiltinModule?.("module")
+                            ?? globalThis.process?.getBuiltinModule?.("node:module");
+
+                        if (!moduleBuiltin?.createRequire) {
+                            throw new Error("No require function available in isolated world");
+                        }
+
+                        return moduleBuiltin.createRequire(${JSON.stringify(addonPath)});
+                    })();
+
+        const equiHdrHook = requireFn(${JSON.stringify(addonPath)});
+    `;
 }
 
-export async function ensureHelper(_: IpcMainInvokeEvent, forceDownload = false): Promise<HelperResult> {
+async function invokeAddon(
+    event: IpcMainInvokeEvent,
+    method: string,
+    args: unknown[] = []
+): Promise<HookResult> {
+    const addonPath = await resolveHookAddon();
+    const encodedArgs = args.map(arg => JSON.stringify(arg)).join(",");
+
+    const result = await event.sender.executeJavaScriptInIsolatedWorld(PRELOAD_WORLD_ID, [{
+        code: `(() => {
+            try {
+                ${isolatedRequireBootstrap(addonPath)}
+                if (typeof equiHdrHook[${JSON.stringify(method)}] !== "function") {
+                    throw new Error("Native hook does not export ${method}");
+                }
+                return equiHdrHook[${JSON.stringify(method)}](${encodedArgs});
+            } catch (error) {
+                return {
+                    ok: false,
+                    message: error instanceof Error
+                        ? \`\${error.name}: \${error.message}\`
+                        : String(error)
+                };
+            }
+        })();`
+    }]);
+
+    if (result == null) {
+        return { ok: false, message: "Native hook isolated-world execution returned no result", addonPath };
+    }
+
+    return { addonPath, ...result };
+}
+
+export async function ensureHookAddon(_: IpcMainInvokeEvent): Promise<HookResult> {
     try {
-        const path = await downloadHelper(forceDownload);
-        return { ok: true, message: "HDR helper is ready", path };
+        const addonPath = await resolveHookAddon();
+        return { ok: true, message: "Native D3D11 hook is ready", addonPath };
     } catch (error: any) {
         return { ok: false, message: error?.message ?? String(error) };
     }
 }
 
-export async function launchMirror(_: IpcMainInvokeEvent, forceDownload = false): Promise<HelperResult> {
+export async function installHook(event: IpcMainInvokeEvent, config: ToneMapConfig): Promise<HookResult> {
     try {
-        if (processIsRunning()) {
-            return {
-                ok: true,
-                message: "HDR helper is already running",
-                path: helperPath(),
-                pid: helperProcess?.pid
-            };
-        }
-
-        const path = await downloadHelper(forceDownload);
-        const child = spawn(path, ["--mirror"], {
-            cwd: helperDirectory(),
-            windowsHide: false,
-            stdio: "ignore"
-        });
-
-        helperProcess = child;
-        child.once("exit", () => {
-            if (helperProcess === child) helperProcess = null;
-        });
-        child.once("error", () => {
-            if (helperProcess === child) helperProcess = null;
-        });
-
-        return {
-            ok: true,
-            message: "EquiHDR SDR mirror launched",
-            path,
-            pid: child.pid
-        };
+        return await invokeAddon(event, "installHook", [config]);
     } catch (error: any) {
         return { ok: false, message: error?.message ?? String(error) };
     }
 }
 
-export async function stopHelper(_: IpcMainInvokeEvent): Promise<HelperResult> {
+export async function updateHook(event: IpcMainInvokeEvent, config: ToneMapConfig): Promise<HookResult> {
     try {
-        if (!processIsRunning()) {
-            helperProcess = null;
-            return { ok: true, message: "HDR helper is not running", path: helperPath() };
-        }
-
-        helperProcess?.kill();
-        helperProcess = null;
-        return { ok: true, message: "HDR helper stopped", path: helperPath() };
+        return await invokeAddon(event, "updateConfig", [config]);
     } catch (error: any) {
         return { ok: false, message: error?.message ?? String(error) };
     }
 }
 
-export async function helperStatus(_: IpcMainInvokeEvent): Promise<HelperResult> {
-    return {
-        ok: true,
-        message: processIsRunning() ? "HDR helper is running" : "HDR helper is not running",
-        path: helperPath(),
-        pid: processIsRunning() ? helperProcess?.pid : undefined
-    };
+export async function removeHook(event: IpcMainInvokeEvent): Promise<HookResult> {
+    try {
+        return await invokeAddon(event, "removeHook");
+    } catch (error: any) {
+        return { ok: false, message: error?.message ?? String(error) };
+    }
+}
+
+export async function hookStats(event: IpcMainInvokeEvent): Promise<HookResult> {
+    try {
+        return await invokeAddon(event, "getStats");
+    } catch (error: any) {
+        return { ok: false, message: error?.message ?? String(error) };
+    }
+}
+
+export async function resetHookStats(event: IpcMainInvokeEvent): Promise<HookResult> {
+    try {
+        return await invokeAddon(event, "resetStats");
+    } catch (error: any) {
+        return { ok: false, message: error?.message ?? String(error) };
+    }
 }
