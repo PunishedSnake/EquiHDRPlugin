@@ -1,0 +1,14 @@
+{
+  "name": "equihdr-native-hook",
+  "private": true,
+  "version": "0.4.0",
+  "scripts": {
+    "build": "node-gyp rebuild --release"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.5.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.4.2"
+  }
+}
