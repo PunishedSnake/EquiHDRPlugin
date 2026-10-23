@@ -56,20 +56,21 @@ jobs:
           )
 
           $old = 'result = app.Initialize(instance) ? app.Run() : 1;'
-          $new = @'
-if (app.Initialize(instance)) {
-            if (wcsstr(GetCommandLineW(), L"--mirror") != nullptr) {
-                app.StartMirror();
-            }
-            result = app.Run();
-        } else {
-            result = 1;
-        }
-'@
+          $new = @(
+            'if (app.Initialize(instance)) {'
+            '            if (wcsstr(GetCommandLineW(), L"--mirror") != nullptr) {'
+            '                app.StartMirror();'
+            '            }'
+            '            result = app.Run();'
+            '        } else {'
+            '            result = 1;'
+            '        }'
+          ) -join "`r`n"
+
           if (-not $source.Contains($old)) {
             throw "Could not find wWinMain initialization anchor in pinned HDR Corrector source."
           }
-          $source = $source.Replace($old, $new.TrimEnd())
+          $source = $source.Replace($old, $new)
 
           Set-Content -Path $path -Value $source -NoNewline
 
