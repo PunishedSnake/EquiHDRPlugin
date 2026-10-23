@@ -1,18 +1,31 @@
 /*
  * EquiHDRPlugin
- * Experimental HDR screenshare fix / diagnostics for Equicord.
+ * HDR screenshare correction / diagnostics for Equicord.
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import { definePluginSettings } from "@api/Settings";
 import { Logger } from "@utils/Logger";
-import definePlugin, { OptionType } from "@utils/types";
+import definePlugin, { OptionType, type PluginNative } from "@utils/types";
 
 const logger = new Logger("EquiHDRPlugin");
+const Native = VencordNative.pluginHelpers.EquiHDRPlugin as PluginNative<typeof import("./native")>;
 
 type CaptureBackend = "default" | "wgc" | "videoHook";
 
 const settings = definePluginSettings({
+    autoLaunchMirror: {
+        description: "Download/start the native GPU tone-mapped SDR mirror when this plugin starts.",
+        type: OptionType.BOOLEAN,
+        default: true
+    },
+
+    stopHelperOnDisable: {
+        description: "Stop the native HDR helper when this plugin is disabled.",
+        type: OptionType.BOOLEAN,
+        default: true
+    },
+
     forceSdr: {
         description: "Force Discord Go Live desktop capture to use hdrCaptureMode = \"never\".",
         type: OptionType.BOOLEAN,
@@ -26,7 +39,7 @@ const settings = definePluginSettings({
     },
 
     captureBackend: {
-        description: "Choose which Windows desktop capture backend Discord should use.",
+        description: "Choose which Windows desktop capture backend Discord should use for the final SDR mirror capture.",
         type: OptionType.SELECT,
         options: [
             {
@@ -64,9 +77,18 @@ function log(name: string, requested: unknown, resolved: unknown) {
     });
 }
 
+async function launchMirror() {
+    const result = await Native.launchMirror(false);
+    if (result.ok) {
+        logger.info(result.message, { path: result.path, pid: result.pid });
+    } else {
+        logger.error("Could not launch EquiHDR SDR mirror:", result.message);
+    }
+}
+
 export default definePlugin({
     name: "EquiHDRPlugin",
-    description: "Attempts to fix blown-out HDR Go Live streams by controlling Discord HDR capture and Windows capture backends.",
+    description: "Tone-maps HDR/scRGB desktop capture to an SDR mirror for Discord Go Live and controls Discord's final capture path.",
     authors: [{ name: "PunishedSnake", id: 0n }],
     settings,
 
@@ -99,6 +121,20 @@ export default definePlugin({
             }
         }
     ],
+
+    start() {
+        if (settings.store.autoLaunchMirror) {
+            void launchMirror();
+        }
+    },
+
+    stop() {
+        if (settings.store.stopHelperOnDisable) {
+            void Native.stopHelper().then(result => {
+                if (settings.store.debugLogging) logger.info(result.message);
+            });
+        }
+    },
 
     getHdrCaptureMode(original: unknown) {
         const resolved = settings.store.forceSdr ? "never" : original;
