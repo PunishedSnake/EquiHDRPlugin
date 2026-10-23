@@ -1,0 +1,108 @@
+name: Build HDR helper
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-helper.yml"
+      - "helper/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build-helper:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out plugin repository
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned HDR Corrector source
+        shell: pwsh
+        run: |
+          git clone https://github.com/Oppiie/HDR-Corrector.git helper-src
+          Set-Location helper-src
+          git checkout f0af798f571cac1a624bd1f1ddeca420a3165139
+
+      - name: Apply EquiHDR helper patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $path = "helper-src/src/main.cpp"
+          $source = Get-Content $path -Raw
+
+          # Give our helper its own mutex so it can coexist with an installed HDR Corrector.
+          $source = $source.Replace(
+            'constexpr wchar_t kMutexName[] = L"Local\\HDRCorrector.SingleInstance";',
+            'constexpr wchar_t kMutexName[] = L"Local\\EquiHDRHelper.SingleInstance";'
+          )
+          $source = $source.Replace(
+            'constexpr wchar_t kAppName[] = L"HDR Corrector";',
+            'constexpr wchar_t kAppName[] = L"EquiHDR Helper";'
+          )
+          $source = $source.Replace(
+            'L"HDR Corrector Stream Mirror"',
+            'L"EquiHDR SDR Mirror"'
+          )
+
+          # Expose a tiny public entry point so --mirror can start the existing mirror pipeline.
+          $source = [regex]::Replace(
+            $source,
+            '(?m)^private:\r?$',
+            "    void StartMirror() { ToggleMirrorWindow(); }`r`n`r`nprivate:",
+            1
+          )
+
+          $old = 'result = app.Initialize(instance) ? app.Run() : 1;'
+          $new = @'
+if (app.Initialize(instance)) {
+            if (wcsstr(GetCommandLineW(), L"--mirror") != nullptr) {
+                app.StartMirror();
+            }
+            result = app.Run();
+        } else {
+            result = 1;
+        }
+'@
+          if (-not $source.Contains($old)) {
+            throw "Could not find wWinMain initialization anchor in pinned HDR Corrector source."
+          }
+          $source = $source.Replace($old, $new.TrimEnd())
+
+          Set-Content -Path $path -Value $source -NoNewline
+
+      - name: Build helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location helper-src
+          ./scripts/build.ps1 -Configuration Release -Version 0.3.0
+          Copy-Item dist/HDRCorrector.exe ../EquiHDRHelper.exe
+          Copy-Item LICENSE ../HDR-Corrector-LICENSE.txt
+          Set-Location ..
+          $hash = (Get-FileHash .\EquiHDRHelper.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  EquiHDRHelper.exe" | Set-Content .\EquiHDRHelper.exe.sha256 -NoNewline
+
+      - name: Publish helper release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view helper-latest --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create helper-latest `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --target "$env:GITHUB_SHA" `
+              --title "EquiHDR native helper" `
+              --notes "Native Windows HDR-to-SDR mirror helper used by EquiHDRPlugin. Built from the pinned MIT-licensed HDR Corrector source with a minimal EquiHDR launcher patch." `
+              --latest=false
+          }
+
+          gh release upload helper-latest `
+            .\EquiHDRHelper.exe `
+            .\EquiHDRHelper.exe.sha256 `
+            .\HDR-Corrector-LICENSE.txt `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --clobber
