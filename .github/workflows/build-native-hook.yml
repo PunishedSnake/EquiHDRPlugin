@@ -1,0 +1,68 @@
+name: Build native D3D11 hook
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-native-hook.yml"
+      - "native-hook/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build-hook:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch pinned MinHook
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git native-hook/minhook
+
+      - name: Install native addon dependencies
+        working-directory: native-hook
+        run: npm install
+
+      - name: Build native addon
+        working-directory: native-hook
+        run: npm run build
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          Copy-Item native-hook/build/Release/equihdr_hook.node ./equihdr_hook.node
+          Copy-Item native-hook/minhook/LICENSE.txt ./MinHook-LICENSE.txt
+          $hash = (Get-FileHash .\equihdr_hook.node -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  equihdr_hook.node" | Set-Content .\equihdr_hook.node.sha256 -NoNewline
+
+      - name: Publish hook release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view hook-latest --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create hook-latest `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --target "$env:GITHUB_SHA" `
+              --title "EquiHDR native D3D11 hook" `
+              --notes "In-process D3D11 VideoProcessorBlt hook with configurable FP16/scRGB tone mapping for Discord Go Live." `
+              --latest=false
+          }
+
+          gh release upload hook-latest `
+            .\equihdr_hook.node `
+            .\equihdr_hook.node.sha256 `
+            .\MinHook-LICENSE.txt `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --clobber
