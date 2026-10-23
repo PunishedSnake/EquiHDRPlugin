@@ -31,6 +31,30 @@ jobs:
         run: |
           git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git native-hook/minhook
 
+      - name: Apply Windows SDK C-interface compatibility fix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $path = "native-hook/hook.cpp"
+          $source = Get-Content $path -Raw
+
+          # With CINTERFACE enabled, the Windows SDK's optional C++ D3D11 helper
+          # classes try to call methods that deliberately no longer exist on the
+          # C-style COM structs. Suppress those helpers explicitly.
+          if (-not $source.Contains("#define D3D11_NO_HELPERS")) {
+            $source = $source.Replace(
+              "#define CINTERFACE",
+              "#define D3D11_NO_HELPERS`r`n#define CINTERFACE"
+            )
+          }
+
+          # __uuidof is unavailable for the CINTERFACE typedefs. The SDK exposes
+          # the same interface IDs as normal IID_* constants.
+          $source = $source.Replace("__uuidof(ID3D11Texture2D)", "IID_ID3D11Texture2D")
+          $source = $source.Replace("__uuidof(ID3D11VideoContext)", "IID_ID3D11VideoContext")
+
+          Set-Content -Path $path -Value $source -NoNewline
+
       - name: Install native addon dependencies
         working-directory: native-hook
         run: npm install --ignore-scripts
