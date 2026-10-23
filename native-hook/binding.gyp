@@ -30,7 +30,8 @@
       "libraries": [
         "d3d11.lib",
         "dxgi.lib",
-        "d3dcompiler.lib"
+        "d3dcompiler.lib",
+        "uuid.lib"
       ]
     }
   ]
